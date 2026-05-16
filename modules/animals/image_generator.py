@@ -49,6 +49,7 @@ def _load_pipeline() -> StableDiffusionPipeline:
     _pipe.scheduler = DPMSolverMultistepScheduler.from_config(
         _pipe.scheduler.config,
         use_karras_sigmas=True,
+        algorithm_type="dpmsolver++",   # required when use_karras_sigmas=True
     )
 
     if cfg.SD_DEVICE == "cuda":
