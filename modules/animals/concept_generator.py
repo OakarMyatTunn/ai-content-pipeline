@@ -66,9 +66,20 @@ Create content for a 60-second educational narration video. Return ONLY valid JS
 """
 
 
-def generate_concept() -> dict:
-    animal_name, tag = _get_today_animal()
-    log.info(f"Today's animal: {animal_name}")
+def generate_concept(animal: str = None) -> dict:
+    """
+    Generate educational content for the given animal.
+    If animal is None, uses today's rotation (for automated daily runs).
+    Pass animal name directly for manual/on-demand generation.
+    """
+    if animal:
+        # Manual pick — use as-is, derive tag from first word
+        animal_name = animal.strip().lower()
+        tag = animal_name.split()[0]
+        log.info(f"Manual animal selection: {animal_name}")
+    else:
+        animal_name, tag = _get_today_animal()
+        log.info(f"Today's animal (auto): {animal_name}")
 
     prompt = _PROMPT.format(animal_name=animal_name, tag=tag)
     client = _get_client()

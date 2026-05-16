@@ -102,3 +102,49 @@ def run(force: bool = False) -> None:
         log.exception(f"Animal pipeline error: {e}")
         send_message(f"❌ <b>Animal pipeline error</b>\n<code>{str(e)}</code>")
         raise
+
+
+def run_for_animal(animal: str) -> None:
+    """
+    Generate one educational video for a specific animal (manual trigger).
+    Called from scripts/generate_animal.py
+    """
+    from datetime import datetime
+    ts  = datetime.now().strftime("%Y%m%d_%H%M")
+    stem = f"animal_{animal.replace(' ', '_')}_{ts}"
+    out_dir = cfg.OUTPUT_ANIMALS / ts
+
+    log.info(f"{'='*60}")
+    log.info(f"MANUAL ANIMAL VIDEO: {animal}")
+    log.info(f"{'='*60}")
+    send_message(f"🐾 <b>Generating video for:</b> <code>{animal}</code>")
+
+    try:
+        # Step 1: Generate concept for this specific animal
+        concept = generate_concept(animal=animal)
+
+        # Step 2: Generate illustrated frames
+        frame_dir = out_dir / "frames"
+        frames = generate_frames(concept, frame_dir)
+
+        # Step 3: Build narrated video
+        video_path = build_animal_video(frames, concept, out_dir, stem)
+
+        # Free GPU memory
+        unload_pipeline()
+
+        # Notify via Telegram
+        summary = (
+            f"✅ <b>Animal video ready!</b>\n"
+            f"🐾 Animal: <code>{animal}</code>\n"
+            f"📁 File: <code>{video_path.name}</code>\n\n"
+            f"📋 <b>Caption to copy:</b>\n"
+            f"<code>{concept.get('caption', '')}</code>"
+        )
+        send_message(summary)
+        log.info(f"MANUAL VIDEO COMPLETE: {video_path.name}")
+
+    except Exception as e:
+        log.exception(f"Manual pipeline error: {e}")
+        send_message(f"❌ <b>Error generating {animal}</b>\n<code>{str(e)}</code>")
+        raise
