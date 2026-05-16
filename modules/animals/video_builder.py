@@ -1,53 +1,18 @@
 """
 Animal Module — Step 3.
 Stitches SD frames into a 9:16 viral video with music and caption overlay.
-Auto-detects ffmpeg path on Windows.
 """
 import subprocess
 import random
-import shutil
 import tempfile
 from pathlib import Path
 from modules.shared.config_loader import cfg
 from modules.shared.logger import log
-
-
-def _get_ffmpeg() -> str:
-    """Find ffmpeg executable — checks PATH first, then common Windows locations."""
-    # Check if it's in PATH
-    found = shutil.which("ffmpeg")
-    if found:
-        return found
-    # Common Windows install locations
-    candidates = [
-        r"C:\ffmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-        r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
-    ]
-    for c in candidates:
-        if Path(c).exists():
-            return c
-    raise FileNotFoundError(
-        "ffmpeg not found. Please install ffmpeg and add it to PATH.\n"
-        "Download: https://github.com/BtbN/FFmpeg-Builds/releases\n"
-        "Extract to C:\\ffmpeg and add C:\\ffmpeg\\bin to system PATH."
-    )
-
-
-_FFMPEG = None
-
-def _ff() -> str:
-    global _FFMPEG
-    if _FFMPEG is None:
-        _FFMPEG = _get_ffmpeg()
-        log.info(f"ffmpeg found: {_FFMPEG}")
-    return _FFMPEG
+from modules.shared.ffmpeg_utils import ff_cmd, get_ffmpeg
 
 
 def _run(cmd: list, label: str = "") -> None:
-    # Replace "ffmpeg" string in cmd with actual path
-    cmd = [_ff() if c == "ffmpeg" else c for c in cmd]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(ff_cmd(cmd), capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg error [{label}]: {result.stderr[-600:]}")
 
