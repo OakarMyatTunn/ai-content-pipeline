@@ -1,8 +1,9 @@
 """
 Animal Module — Step 2.
-Generates frames using local Stable Diffusion 1.5.
+Generates frames using local DreamShaper 8 (SD 1.5 fine-tune).
 Optimised for RTX 3050 4GB VRAM.
-Falls back to CPU if CUDA fails (slow but works).
+DreamShaper 8 produces much better cartoon/artistic animal style
+vs vanilla SD 1.5, while using identical VRAM and pipeline class.
 """
 import gc
 import torch
@@ -22,33 +23,45 @@ def _load_pipeline() -> StableDiffusionPipeline:
         return _pipe
 
     log.info(f"Loading SD pipeline: {cfg.SD_MODEL}")
-    log.info(f"Device: {cfg.SD_DEVICE} | Low VRAM mode: {cfg.SD_LOW_VRAM}")
+    log.info(f"Device: {cfg.SD_DEVICE} | Low VRAM: {cfg.SD_LOW_VRAM}")
 
-    _pipe = StableDiffusionPipeline.from_pretrained(
-        cfg.SD_MODEL,
-        torch_dtype=torch.float16 if cfg.SD_DEVICE == "cuda" else torch.float32,
-        safety_checker=None,          # disable — we're generating cute animals
-        requires_safety_checker=False,
-    )
+    # DreamShaper 8 supports fp16 variant — faster load, less RAM
+    try:
+        _pipe = StableDiffusionPipeline.from_pretrained(
+            cfg.SD_MODEL,
+            torch_dtype=torch.float16 if cfg.SD_DEVICE == "cuda" else torch.float32,
+            variant="fp16",
+            safety_checker=None,
+            requires_safety_checker=False,
+        )
+        log.info("Loaded with fp16 variant")
+    except Exception:
+        # Fallback: load without variant (works for any SD 1.5 model)
+        log.info("fp16 variant not found, loading default weights...")
+        _pipe = StableDiffusionPipeline.from_pretrained(
+            cfg.SD_MODEL,
+            torch_dtype=torch.float16 if cfg.SD_DEVICE == "cuda" else torch.float32,
+            safety_checker=None,
+            requires_safety_checker=False,
+        )
 
-    # Faster scheduler (DPM++ 2M) — better quality at fewer steps
+    # DPM++ 2M Karras — best quality/speed for cartoon style at 35 steps
     _pipe.scheduler = DPMSolverMultistepScheduler.from_config(
-        _pipe.scheduler.config
+        _pipe.scheduler.config,
+        use_karras_sigmas=True,
     )
 
     if cfg.SD_DEVICE == "cuda":
         if cfg.SD_LOW_VRAM:
-            # SDXL fallback mode — offload to CPU RAM
             _pipe.enable_model_cpu_offload()
             log.info("CPU offload enabled (low VRAM mode)")
         else:
             _pipe = _pipe.to("cuda")
-            # Attention slicing = less VRAM at slight speed cost — good for 4GB
             _pipe.enable_attention_slicing()
             log.info("Attention slicing enabled for 4GB VRAM")
     else:
         _pipe = _pipe.to("cpu")
-        log.warning("Running on CPU — image generation will be slow")
+        log.warning("Running on CPU — generation will be slow")
 
     log.info("SD pipeline loaded ✓")
     return _pipe
@@ -56,7 +69,7 @@ def _load_pipeline() -> StableDiffusionPipeline:
 
 def generate_frames(concept: dict, out_dir: Path, n_frames: int = None) -> list[Path]:
     """
-    Generate N frames from the concept's SD prompt.
+    Generate N frames from concept's SD prompt.
     Returns list of saved image paths.
     """
     n = n_frames or cfg.SD_FRAMES
@@ -65,7 +78,7 @@ def generate_frames(concept: dict, out_dir: Path, n_frames: int = None) -> list[
     out_dir.mkdir(parents=True, exist_ok=True)
 
     log.info(f"Generating {n} frames | style: {concept.get('style','?')}")
-    log.info(f"Prompt: {prompt[:80]}...")
+    log.info(f"Prompt: {prompt[:100]}...")
 
     pipe = _load_pipeline()
     paths = []
@@ -80,8 +93,8 @@ def generate_frames(concept: dict, out_dir: Path, n_frames: int = None) -> list[
                 height=cfg.SD_HEIGHT,
                 num_inference_steps=cfg.SD_STEPS,
                 guidance_scale=cfg.SD_GUIDANCE,
-                # Different seed per frame for variety
-                generator=torch.Generator(device=cfg.SD_DEVICE).manual_seed(i * 137),
+                # Varied seeds for frame diversity
+                generator=torch.Generator(device=cfg.SD_DEVICE).manual_seed(i * 137 + 42),
             )
         img: Image.Image = result.images[0]
         frame_path = out_dir / f"frame_{i:04d}.png"
@@ -90,7 +103,6 @@ def generate_frames(concept: dict, out_dir: Path, n_frames: int = None) -> list[
 
     log.info(f"Generated {len(paths)} frames ✓")
 
-    # Free VRAM between runs if multiple batches
     if cfg.SD_DEVICE == "cuda":
         torch.cuda.empty_cache()
         gc.collect()

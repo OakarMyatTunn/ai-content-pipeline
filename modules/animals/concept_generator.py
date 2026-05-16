@@ -1,8 +1,8 @@
 """
 Animal Module — Step 1.
-Gemini generates today's animal video concept + Stable Diffusion prompt.
-Style rotates daily: realistic → cartoon → photorealistic → anime → mixed
-Uses google-genai SDK (new, replaces deprecated google-generativeai)
+Gemini generates today's animal video concept + DreamShaper-optimised SD prompt.
+Prompts tuned for chubby cartoon animal style (like @cuteandchubbycat TikTok).
+Uses google-genai SDK.
 """
 import json
 import random
@@ -19,46 +19,70 @@ def _get_client():
         _client = genai.Client(api_key=cfg.GEMINI_API_KEY)
     return _client
 
+# Daily style rotation — all tuned for DreamShaper 8 strengths
 STYLE_ROTATION = {
-    0: "photorealistic",
-    1: "cartoon",
-    2: "anime",
-    3: "photorealistic",
-    4: "cartoon",
-    5: "mixed",
-    6: "anime",
+    0: "3d cartoon render",
+    1: "chibi anime",
+    2: "pixar style",
+    3: "3d cartoon render",
+    4: "chibi anime",
+    5: "pixar style",
+    6: "3d cartoon render",
 }
 
-ANIMAL_ROTATION = {0: "cat", 1: "dog", 2: "mixed"}
+# Orange/ginger cat heavy rotation — closest to viral TikTok style
+ANIMAL_ROTATION = {
+    0: "chubby orange cat",
+    1: "chubby orange cat",
+    2: "fluffy golden retriever puppy",
+    3: "chubby orange cat",
+    4: "chubby orange cat",
+    5: "fluffy corgi puppy",
+    6: "chubby orange cat",
+}
 
-DANCE_STYLES = [
-    "breakdancing", "ballet", "hiphop", "salsa", "moonwalk",
-    "twerking gracefully", "floss dance", "robot dance",
-    "traditional Malaysian dance", "disco",
+ACTIONS = [
+    "dancing happily",
+    "eating a big bowl of food",
+    "waving at the camera",
+    "sleeping and dreaming",
+    "playing with a ball of yarn",
+    "jumping excitedly",
+    "doing a little spin",
+    "sitting and looking cute",
+    "stretching and yawning",
+    "running playfully",
 ]
 
 BACKGROUNDS = [
-    "neon city at night", "tropical beach", "cozy living room",
-    "enchanted forest", "outer space", "Japanese cherry blossom garden",
-    "Malaysian street market", "colourful confetti rain", "retro diner",
+    "cozy living room with warm lighting",
+    "magical garden with flowers",
+    "kitchen with colourful decorations",
+    "beach at sunset",
+    "snowy winter scene",
+    "rainbow candy land",
+    "Japanese cherry blossom park",
+    "neon city night",
+    "sunny meadow with butterflies",
+    "cozy bedroom with fairy lights",
 ]
 
-_CONCEPT_PROMPT = """You are a creative director for a viral social media animal content page.
+_CONCEPT_PROMPT = """You are a creative director for a viral TikTok animal page similar to @cuteandchubbycat.
 
-Today's parameters:
+Today's video concept:
 - Animal: {animal}
 - Visual style: {style}
-- Dance/action: {dance}
+- Action: {action}
 - Background: {background}
 
-Generate a viral animal video concept. Return ONLY valid JSON, no markdown, no explanation:
+Generate a viral concept. Return ONLY valid JSON, no markdown, no extra text:
 
 {{
-  "title": "short punchy title (max 6 words)",
-  "description": "2-sentence description of the video scene",
-  "sd_prompt": "detailed Stable Diffusion image generation prompt, optimized for {style} style, featuring a {animal} {dance} in {background}, cute, high quality, social media viral",
-  "sd_negative": "blurry, low quality, ugly, deformed, extra limbs, watermark, text",
-  "caption": "viral TikTok/Reels caption with emojis — hook line, 2-line description, 6 hashtags",
+  "title": "catchy title max 5 words with emoji",
+  "description": "1 sentence describing the cute scene",
+  "sd_prompt": "{style}, {animal}, {action}, {background}, chubby cute proportions, big expressive eyes, smooth shading, vibrant saturated colors, thick clean outlines, high quality render, adorable, wholesome, social media viral, masterpiece, best quality",
+  "sd_negative": "ugly, deformed, blurry, low quality, realistic photo, human, text, watermark, extra limbs, bad anatomy, dark, scary, violence",
+  "caption": "viral TikTok caption — start with a hook emoji, 2 fun lines, 8 trending hashtags including #aicat #cutecat #fyp #viral",
   "style": "{style}",
   "animal": "{animal}"
 }}
@@ -68,14 +92,14 @@ Generate a viral animal video concept. Return ONLY valid JSON, no markdown, no e
 def generate_concept() -> dict:
     today = date.today()
     style  = STYLE_ROTATION[today.weekday()]
-    animal = ANIMAL_ROTATION[today.day % 3]
-    dance  = random.choice(DANCE_STYLES)
+    animal = ANIMAL_ROTATION[today.day % 7]
+    action = random.choice(ACTIONS)
     bg     = random.choice(BACKGROUNDS)
 
-    log.info(f"Today's concept: {animal} | {style} | {dance} | {bg}")
+    log.info(f"Today's concept: {animal} | {style} | {action}")
 
     prompt = _CONCEPT_PROMPT.format(
-        animal=animal, style=style, dance=dance, background=bg
+        animal=animal, style=style, action=action, background=bg
     )
 
     client = _get_client()
@@ -85,34 +109,41 @@ def generate_concept() -> dict:
     )
     raw = response.text.strip()
 
+    # Strip markdown fences if present
     if raw.startswith("```"):
-        raw = raw.split("```")[1]
+        parts = raw.split("```")
+        raw = parts[1] if len(parts) > 1 else parts[0]
         if raw.startswith("json"):
             raw = raw[4:]
 
     try:
-        concept = json.loads(raw)
+        concept = json.loads(raw.strip())
     except json.JSONDecodeError:
         log.warning("Gemini returned non-JSON, using fallback concept")
-        concept = _fallback_concept(animal, style, dance, bg)
+        concept = _fallback_concept(animal, style, action, bg)
 
     log.info(f"Concept: {concept.get('title', 'N/A')}")
     return concept
 
 
-def _fallback_concept(animal, style, dance, bg):
+def _fallback_concept(animal, style, action, bg):
     return {
-        "title": f"Cute {animal} {dance}",
-        "description": f"A {style} {animal} doing the {dance} in {bg}.",
+        "title": f"🐱 {animal.title()} Moment",
+        "description": f"A {style} {animal} {action} in {bg}.",
         "sd_prompt": (
-            f"{style} style {animal} {dance}, {bg}, "
-            f"cute, fluffy, expressive eyes, high quality, viral social media"
+            f"{style}, {animal}, {action}, {bg}, "
+            f"chubby cute proportions, big expressive eyes, smooth shading, "
+            f"vibrant saturated colors, thick clean outlines, high quality render, "
+            f"adorable, wholesome, masterpiece, best quality"
         ),
-        "sd_negative": "blurry, low quality, ugly, deformed, watermark",
+        "sd_negative": (
+            "ugly, deformed, blurry, low quality, realistic photo, human, "
+            "text, watermark, extra limbs, bad anatomy, dark, scary"
+        ),
         "caption": (
-            f"This {animal} just broke the internet 😂🔥\n"
-            f"Watch till the end!\n"
-            f"#{animal} #cute{animal.capitalize()} #viral #fyp #foryou #trending"
+            f"😍 This {animal} just made my day!\n"
+            f"So cute I can't handle it 🥹\n"
+            f"#aicat #cutecat #fyp #viral #cute #cat #animallover #trending"
         ),
         "style": style,
         "animal": animal,
