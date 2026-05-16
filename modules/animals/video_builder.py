@@ -9,7 +9,6 @@ Builds educational narration video:
 6. Mix narration + background music (music at 20% volume)
 7. Final export for TikTok/YouTube/Facebook
 """
-import asyncio
 import json
 import subprocess
 import random
@@ -17,7 +16,6 @@ import tempfile
 import textwrap
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-import edge_tts
 from modules.shared.config_loader import cfg
 from modules.shared.logger import log
 from modules.shared.ffmpeg_utils import ff_cmd, get_ffmpeg
@@ -57,14 +55,12 @@ def _pick_music(music_dir: Path):
 
 # ── TTS ───────────────────────────────────────────────────────────────────────
 
-async def _generate_tts(text: str, out_path: Path) -> None:
-    communicate = edge_tts.Communicate(text=text, voice=cfg.EN_TTS_VOICE)
-    await communicate.save(str(out_path))
-
-
 def generate_narration(narration: str, out_path: Path) -> Path:
-    log.info("Generating narration audio (Edge TTS)...")
-    asyncio.run(_generate_tts(narration, out_path))
+    """Generate narration using gTTS (reliable, no region blocks)."""
+    log.info("Generating narration audio (gTTS)...")
+    from gtts import gTTS
+    tts = gTTS(text=narration, lang="en", slow=False)
+    tts.save(str(out_path))
     duration = _ffprobe_duration(out_path)
     log.info(f"Narration audio: {duration:.1f}s → {out_path.name}")
     return out_path
