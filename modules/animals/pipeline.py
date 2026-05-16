@@ -2,8 +2,11 @@
 Animal content pipeline orchestrator.
 Called by APScheduler daily at 10:15 AM Malaysia time.
 Also called on startup if today's job hasn't run yet (catch-up).
+Quota-aware: gemini-2.5-flash has 20 RPD free — each video uses 2 calls.
+Max 3 videos/day = 6 calls, well within limits.
 """
 import json
+import time
 from pathlib import Path
 from datetime import date, datetime
 from modules.shared.config_loader import cfg
@@ -13,9 +16,8 @@ from modules.animals.concept_generator import generate_concept
 from modules.animals.image_generator import generate_frames, unload_pipeline
 from modules.animals.video_builder import build_animal_video
 
-# Number of videos to generate per day (can vary by day)
-from datetime import date as _date
-VIDEOS_PER_DAY = {0: 2, 1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3}  # Mon–Sun
+# Reduced to stay within 20 RPD quota (2 Gemini calls per video)
+VIDEOS_PER_DAY = {0: 2, 1: 2, 2: 2, 3: 2, 4: 3, 5: 3, 6: 3}  # Mon–Sun, max 3
 
 _STATE_FILE = Path(__file__).parents[2] / "logs" / "animal_last_run.json"
 
@@ -39,10 +41,6 @@ def _mark_ran() -> None:
 
 
 def run(force: bool = False) -> None:
-    """
-    Run the daily animal content pipeline.
-    Skips if already ran today (unless force=True).
-    """
     if not force and _already_ran_today():
         log.info("Animal pipeline already ran today — skipping.")
         return
@@ -54,7 +52,10 @@ def run(force: bool = False) -> None:
     log.info(f"{'='*60}")
     log.info(f"ANIMAL PIPELINE START — {today} — {n_videos} videos")
     log.info(f"{'='*60}")
-    send_message(f"🐾 <b>Daily animal pipeline starting</b>\nGenerating <b>{n_videos}</b> videos today...")
+    send_message(
+        f"🐾 <b>Daily animal pipeline starting</b>\n"
+        f"Generating <b>{n_videos}</b> videos today..."
+    )
 
     generated = []
 
@@ -64,14 +65,19 @@ def run(force: bool = False) -> None:
             stem = f"animal_{ts}_{i+1:02d}"
             out_dir = cfg.OUTPUT_ANIMALS / ts
 
-            # Step 1: Generate concept
+            # Step 1: Generate concept (1 Gemini call)
+            # Small delay between calls to respect RPM limits
+            if i > 0:
+                log.info("Waiting 10s between Gemini calls (rate limit safety)...")
+                time.sleep(10)
+
             concept = generate_concept()
 
-            # Step 2: Generate frames
+            # Step 2: Generate frames (local GPU — no API calls)
             frame_dir = out_dir / f"frames_{i+1:02d}"
             frames = generate_frames(concept, frame_dir)
 
-            # Step 3: Build video
+            # Step 3: Build video (local ffmpeg — no API calls)
             video_path = build_animal_video(frames, concept, out_dir, stem)
 
             generated.append({
@@ -84,10 +90,8 @@ def run(force: bool = False) -> None:
 
             log.info(f"Video {i+1} complete: {video_path.name}")
 
-        # Unload SD from GPU when all done — free VRAM for recap if needed
+        # Free GPU memory when done
         unload_pipeline()
-
-        # Mark today's run complete
         _mark_ran()
 
         # Send Telegram summary
