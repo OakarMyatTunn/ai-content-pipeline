@@ -1,47 +1,139 @@
 """
 Step 4 of recap pipeline.
 - Selects key scenes using Whisper timestamps
-- Clips scenes (3–4 sec cuts) with ffmpeg
-- Crops to 9:16 (1080×1920)
+- Clips scenes (3-4 sec cuts) with ffmpeg
+- Crops to 9:16 (1080x1920)
 - Overlays voiceover audio
-- Burns styled subtitles
+- Burns subtitles via PIL overlay (no fontconfig — Windows compatible)
 - Applies light copyright mitigation filters
 - Exports for TikTok / Facebook / YouTube Shorts
 """
 import subprocess
-from modules.shared.ffmpeg_utils import ff_cmd
 import tempfile
 import random
+import textwrap
 from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+from modules.shared.ffmpeg_utils import ff_cmd
 from modules.shared.config_loader import cfg
 from modules.shared.logger import log
 
-# Platform export profiles
 PLATFORMS = {
-    "tiktok":    {"suffix": "_tiktok.mp4",    "crf": "23", "preset": "fast"},
-    "facebook":  {"suffix": "_facebook.mp4",  "crf": "23", "preset": "fast"},
-    "ytshorts":  {"suffix": "_ytshorts.mp4",  "crf": "22", "preset": "fast"},
+    "tiktok":   {"suffix": "_tiktok.mp4",   "crf": "23", "preset": "fast"},
+    "facebook": {"suffix": "_facebook.mp4", "crf": "23", "preset": "fast"},
+    "ytshorts": {"suffix": "_ytshorts.mp4", "crf": "22", "preset": "fast"},
 }
 
-# Subtitle style (ASS override string)
-SUBTITLE_STYLE = (
-    "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,"
-    "OutlineColour=&H00000000,Outline=2,Shadow=1,"
-    "Alignment=2,MarginV=60"
-)
+
+def _run_ffmpeg(cmd: list, label: str = "") -> None:
+    log.info(f"ffmpeg {label}...")
+    result = subprocess.run(ff_cmd(cmd), capture_output=True, text=True)
+    if result.returncode != 0:
+        log.error(f"ffmpeg failed: {result.stderr[-600:]}")
+        raise RuntimeError(f"ffmpeg error in {label}")
+
+
+def _get_font(size: int) -> ImageFont.ImageFont:
+    candidates = [
+        "C:/Windows/Fonts/Arial.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/calibri.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            try:
+                return ImageFont.truetype(c, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()
+
+
+def _make_subtitle_png(text: str, width: int, font_size: int = 38) -> Image.Image:
+    """Render subtitle text as RGBA PNG — semi-transparent bar + white text."""
+    font = _get_font(font_size)
+    wrapped = textwrap.fill(text, width=32)
+    lines = wrapped.split("\n")
+    line_h = font_size + 10
+    bar_h = line_h * len(lines) + 20
+    img = Image.new("RGBA", (width, bar_h), (0, 0, 0, 170))
+    draw = ImageDraw.Draw(img)
+    for i, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        tw = bbox[2] - bbox[0]
+        x = max(10, (width - tw) // 2)
+        y = 10 + i * line_h
+        draw.text((x + 2, y + 2), line, font=font, fill=(0, 0, 0, 200))
+        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
+    return img
+
+
+def _burn_subtitles_pil(
+    raw_video: Path,
+    audio_path: Path,
+    script: str,
+    tmp_path: Path,
+    lang: str,
+) -> Path:
+    """
+    Burn timed subtitles using PIL PNG overlays — no fontconfig needed.
+    Splits script into 8-word chunks, times evenly, overlays each chunk.
+    """
+    words = script.split()
+    chunk_size = 8
+    chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    time_per_chunk = chunk_size * 0.45  # ~0.45s per word
+
+    # Generate subtitle PNGs
+    subtitle_data = []
+    for i, chunk in enumerate(chunks):
+        img = _make_subtitle_png(chunk, cfg.VIDEO_WIDTH)
+        p = tmp_path / f"sub_{lang}_{i:04d}.png"
+        img.save(str(p))
+        t_start = i * time_per_chunk
+        t_end = t_start + time_per_chunk
+        subtitle_data.append((p, t_start, t_end))
+
+    # Build ffmpeg overlay filter chain
+    inputs = ["-i", str(raw_video), "-i", str(audio_path)]
+    for p, _, _ in subtitle_data:
+        inputs += ["-i", str(p)]
+
+    y_pos = cfg.VIDEO_HEIGHT - 180
+    filter_parts = []
+    prev = "[0:v]"
+    for idx, (_, t_start, t_end) in enumerate(subtitle_data):
+        inp = f"[{idx+2}:v]"  # +2 because inputs 0=video, 1=audio
+        out = f"[sv{idx}]"
+        enable = f"enable='between(t,{t_start:.2f},{t_end:.2f})'"
+        filter_parts.append(f"{prev}{inp}overlay=0:{y_pos}:{enable}{out}")
+        prev = out
+
+    filter_complex = ";".join(filter_parts)
+    mixed_video = tmp_path / f"mixed_{lang}.mp4"
+
+    _run_ffmpeg(
+        ["ffmpeg", "-y"]
+        + inputs
+        + [
+            "-filter_complex", filter_complex,
+            "-map", prev,
+            "-map", "1:a",
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(mixed_video),
+        ],
+        f"mix voiceover + subtitles ({lang})"
+    )
+    return mixed_video
 
 
 def select_key_segments(segments: list[dict], max_duration: int = 180) -> list[dict]:
-    """
-    Pick engaging segments up to max_duration seconds total.
-    Strategy: first 10s (hook), spread across middle, last 10s (cliffhanger).
-    Clips are capped at 4 seconds each to help with Content ID avoidance.
-    """
     MAX_CLIP = 4.0
     selected = []
     total = 0.0
 
-    # Always include opening hook (first ~10 seconds of content)
     for seg in segments[:5]:
         dur = min(seg["end"] - seg["start"], MAX_CLIP)
         selected.append({**seg, "clip_duration": dur})
@@ -49,8 +141,7 @@ def select_key_segments(segments: list[dict], max_duration: int = 180) -> list[d
         if total >= 10:
             break
 
-    # Sample from middle
-    mid = segments[len(segments) // 4 : 3 * len(segments) // 4]
+    mid = segments[len(segments) // 4: 3 * len(segments) // 4]
     step = max(1, len(mid) // 20)
     for seg in mid[::step]:
         if total >= max_duration - 15:
@@ -59,7 +150,6 @@ def select_key_segments(segments: list[dict], max_duration: int = 180) -> list[d
         selected.append({**seg, "clip_duration": dur})
         total += dur
 
-    # Always include ending
     for seg in segments[-5:]:
         dur = min(seg["end"] - seg["start"], MAX_CLIP)
         selected.append({**seg, "clip_duration": dur})
@@ -69,27 +159,15 @@ def select_key_segments(segments: list[dict], max_duration: int = 180) -> list[d
     return selected
 
 
-def _run_ffmpeg(cmd: list, label: str = "") -> None:
-    log.info(f"ffmpeg {label}...")
-    result = subprocess.run(ff_cmd(cmd), capture_output=True, text=True)
-    if result.returncode != 0:
-        log.error(f"ffmpeg failed: {result.stderr[-500:]}")
-        raise RuntimeError(f"ffmpeg error in {label}")
-
-
 def build_video(
     source_video: Path,
     audio_path: Path,
     segments: list[dict],
-    scripts: dict,        # {"english": str, "myanmar": str}
-    lang: str,            # "english" or "myanmar"
+    scripts: dict,
+    lang: str,
     out_dir: Path,
     stem: str,
 ) -> dict[str, Path]:
-    """
-    Assemble the full recap video for one language.
-    Returns: {"tiktok": Path, "facebook": Path, "ytshorts": Path}
-    """
     out_dir.mkdir(parents=True, exist_ok=True)
     selected = select_key_segments(segments)
 
@@ -97,10 +175,9 @@ def build_video(
         tmp_path = Path(tmp)
         clip_paths = []
 
-        # ── 1. Extract individual clips ─────────────────────────────────────
+        # ── 1. Extract clips ──────────────────────────────────────────────────
         for i, seg in enumerate(selected):
             clip_out = tmp_path / f"clip_{i:04d}.mp4"
-            # Slight random zoom (1.02–1.06×) for copyright mitigation
             zoom = round(random.uniform(1.02, 1.06), 3)
             _run_ffmpeg([
                 "ffmpeg", "-y",
@@ -110,16 +187,16 @@ def build_video(
                 "-vf", (
                     f"scale={cfg.VIDEO_WIDTH*2}:{cfg.VIDEO_HEIGHT*2},"
                     f"zoompan=z={zoom}:d=1:s={cfg.VIDEO_WIDTH}x{cfg.VIDEO_HEIGHT},"
-                    f"crop={cfg.VIDEO_WIDTH}:{cfg.VIDEO_HEIGHT},"   # 9:16 crop
-                    f"eq=saturation=1.1:contrast=1.05"              # slight grade
+                    f"crop={cfg.VIDEO_WIDTH}:{cfg.VIDEO_HEIGHT},"
+                    f"eq=saturation=1.1:contrast=1.05"
                 ),
-                "-an",      # no audio in clip (we overlay voiceover later)
+                "-an",
                 "-c:v", "libx264", "-preset", "ultrafast",
                 str(clip_out),
             ], f"clip {i+1}/{len(selected)}")
             clip_paths.append(clip_out)
 
-        # ── 2. Concatenate clips ─────────────────────────────────────────────
+        # ── 2. Concatenate ────────────────────────────────────────────────────
         concat_list = tmp_path / "concat.txt"
         concat_list.write_text(
             "\n".join(f"file '{p}'" for p in clip_paths), encoding="utf-8"
@@ -133,25 +210,12 @@ def build_video(
             str(raw_video),
         ], "concat")
 
-        # ── 3. Generate SRT for voiceover subtitles ──────────────────────────
-        script_text = scripts[lang]
-        srt_path = tmp_path / f"subs_{lang}.srt"
-        _write_simple_srt(script_text, srt_path)
+        # ── 3. Burn subtitles + mix audio (PIL — no fontconfig) ───────────────
+        mixed_video = _burn_subtitles_pil(
+            raw_video, audio_path, scripts[lang], tmp_path, lang
+        )
 
-        # ── 4. Overlay voiceover + burn subtitles ────────────────────────────
-        mixed_video = tmp_path / f"mixed_{lang}.mp4"
-        _run_ffmpeg([
-            "ffmpeg", "-y",
-            "-i", str(raw_video),
-            "-i", str(audio_path),
-            "-vf", f"subtitles={srt_path}:force_style='{SUBTITLE_STYLE}'",
-            "-c:v", "libx264",
-            "-c:a", "aac", "-b:a", "192k",
-            "-shortest",       # trim to whichever track ends first
-            str(mixed_video),
-        ], "mix voiceover + subtitles")
-
-        # ── 5. Export per platform ───────────────────────────────────────────
+        # ── 4. Export per platform ────────────────────────────────────────────
         outputs = {}
         for platform, profile in PLATFORMS.items():
             out_path = out_dir / f"{stem}_{lang}{profile['suffix']}"
@@ -162,35 +226,13 @@ def build_video(
                 "-crf", profile["crf"],
                 "-preset", profile["preset"],
                 "-c:a", "aac", "-b:a", "192k",
-                "-movflags", "+faststart",   # web-friendly
+                "-movflags", "+faststart",
                 str(out_path),
             ], f"export {platform}")
             outputs[platform] = out_path
             log.info(f"✓ {platform}: {out_path.name}")
 
     return outputs
-
-
-def _write_simple_srt(script: str, path: Path) -> None:
-    """
-    Split script into ~8-word subtitle chunks and write SRT.
-    Timing is approximate (evenly distributed) — good enough for recap style.
-    """
-    words = script.split()
-    chunk_size = 8
-    chunks = [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
-
-    # Estimate ~0.5s per word
-    time_per_chunk = chunk_size * 0.5
-    lines = []
-    for i, chunk in enumerate(chunks):
-        start = i * time_per_chunk
-        end = start + time_per_chunk
-        lines.append(str(i + 1))
-        lines.append(f"{_fmt(start)} --> {_fmt(end)}")
-        lines.append(chunk)
-        lines.append("")
-    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _fmt(s: float) -> str:
