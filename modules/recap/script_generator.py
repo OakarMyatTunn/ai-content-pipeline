@@ -1,0 +1,76 @@
+"""
+Step 2 of recap pipeline.
+Sends SRT transcript to Gemini 1.5 Flash.
+Generates two scripts: English and Myanmar (Burmese).
+"""
+import google.generativeai as genai
+from modules.shared.config_loader import cfg
+from modules.shared.logger import log
+
+
+genai.configure(api_key=cfg.GEMINI_API_KEY)
+_model = genai.GenerativeModel(cfg.GEMINI_MODEL)
+
+_EN_PROMPT = """You are a viral social media video scriptwriter specialising in movie recaps.
+
+Given the following movie transcript (SRT format), write a compelling recap script for a 
+short-form vertical video (TikTok / YouTube Shorts / Facebook Reels).
+
+RULES:
+- Hook in the FIRST sentence — make it impossible to scroll past
+- Total script: 250–350 words (fits a 2–3 minute voiceover)
+- 3-act structure: setup → conflict → resolution/cliffhanger
+- Conversational tone — like a friend telling a story at lunch
+- End with a "did you catch that?" type curiosity hook
+- DO NOT include stage directions, timestamps, or formatting tags
+- Output ONLY the script text, nothing else
+
+TRANSCRIPT:
+{srt}
+"""
+
+_MY_PROMPT = """သင်သည် မြန်မာဘာသာဖြင့် ဗီဒီယိုရှင်းလင်းချက် ရေးသားသူဖြစ်သည်။
+
+အောက်ပါ ရုပ်ရှင် transcript (SRT ပုံစံ) ကို အသုံးပြု၍ TikTok / YouTube Shorts / Facebook Reels 
+အတွက် ဗီဒီယိုများကို ဆွဲဆောင်မှုရှိသော မြန်မာဘာသာ recap script တစ်ခု ရေးပါ။
+
+စည်းမျဉ်းများ:
+- ပထမဆုံးဝါကျတွင် ဖိတ်ခေါ်မှုရှိပါစေ — မဖတ်မဖြစ်အောင်ရေးပါ
+- Script စုစုပေါင်း: မြန်မာဘာသာ ၂၀၀–၃၀၀ ကြားပါဝင်ရမည်
+- သုံးပိုင်းဖွဲ့စည်းမှု: မိတ်ဆက် → ဇာတ်ကွက် → အဖြေ/ပိတ်ပင်မှု
+- သဘာဝကျသော ပြောဆိုမှုပုံစံဖြင့် ရေးပါ
+- နောက်ဆုံးတွင် စိတ်ဝင်စားမှုဖြစ်ပေါ်စေသော မေးခွန်းဖြင့် အဆုံးသတ်ပါ
+- ဘာသာပြန်မှုမဟုတ်ဘဲ မြန်မာ့ပရိသတ်အတွက် သင့်လျော်အောင် ရေးပါ
+- Script ကိုသာ ထုတ်ပေးပါ၊ အခြားဘာမှမပါဝင်ရ
+
+TRANSCRIPT:
+{srt}
+"""
+
+
+def generate_scripts(srt: str, movie_name: str = "") -> dict:
+    """
+    Generate English and Myanmar recap scripts from SRT.
+    Returns: {"english": str, "myanmar": str}
+    """
+    # Trim SRT if too long (Gemini free tier: 1M tokens, but we keep it sane)
+    srt_trimmed = srt[:80_000] if len(srt) > 80_000 else srt
+
+    log.info("Generating English recap script via Gemini...")
+    en_response = _model.generate_content(
+        _EN_PROMPT.format(srt=srt_trimmed)
+    )
+    script_en = en_response.text.strip()
+    log.info(f"English script: {len(script_en.split())} words")
+
+    log.info("Generating Myanmar recap script via Gemini...")
+    my_response = _model.generate_content(
+        _MY_PROMPT.format(srt=srt_trimmed)
+    )
+    script_my = my_response.text.strip()
+    log.info(f"Myanmar script: {len(script_my)} characters")
+
+    return {
+        "english": script_en,
+        "myanmar": script_my,
+    }
