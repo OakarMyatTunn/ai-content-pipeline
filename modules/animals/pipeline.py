@@ -83,9 +83,9 @@ def run(force: bool = False) -> None:
             generated.append({
                 "path": video_path,
                 "caption": concept.get("caption", ""),
-                "style": concept.get("style", "mixed"),
                 "title": concept.get("title", ""),
                 "animal": concept.get("animal", ""),
+                "narration": concept.get("narration", "")[:120] + "...",
             })
 
             log.info(f"Video {i+1} complete: {video_path.name}")

@@ -1,8 +1,10 @@
 """
 Animal Module — Step 1.
-Gemini generates today's animal video concept + DreamShaper-optimised SD prompt.
-Prompts tuned for chubby cartoon animal style (like @cuteandchubbycat TikTok).
-Uses google-genai SDK.
+Generates educational animal fact content:
+- 5 interesting facts about the animal (narration script)
+- Stable Diffusion prompt for each fact's illustration
+- TikTok/YouTube caption with hashtags
+Fixed animal anatomy by using precise SD prompts.
 """
 import json
 import random
@@ -19,90 +21,58 @@ def _get_client():
         _client = genai.Client(api_key=cfg.GEMINI_API_KEY)
     return _client
 
-# Daily style rotation — all tuned for DreamShaper 8 strengths
-STYLE_ROTATION = {
-    0: "3d cartoon render",
-    1: "chibi anime",
-    2: "pixar style",
-    3: "3d cartoon render",
-    4: "chibi anime",
-    5: "pixar style",
-    6: "3d cartoon render",
-}
-
-# Orange/ginger cat heavy rotation — closest to viral TikTok style
-ANIMAL_ROTATION = {
-    0: "chubby orange cat",
-    1: "chubby orange cat",
-    2: "fluffy golden retriever puppy",
-    3: "chubby orange cat",
-    4: "chubby orange cat",
-    5: "fluffy corgi puppy",
-    6: "chubby orange cat",
-}
-
-ACTIONS = [
-    "dancing happily",
-    "eating a big bowl of food",
-    "waving at the camera",
-    "sleeping and dreaming",
-    "playing with a ball of yarn",
-    "jumping excitedly",
-    "doing a little spin",
-    "sitting and looking cute",
-    "stretching and yawning",
-    "running playfully",
+# Animals that generate well in DreamShaper — specific enough to avoid anatomy errors
+ANIMALS = [
+    ("orange tabby cat",     "cat"),
+    ("golden retriever dog", "dog"),
+    ("red fox",              "fox"),
+    ("barn owl",             "owl"),
+    ("giant panda",          "panda"),
+    ("bottlenose dolphin",   "dolphin"),
+    ("snow leopard",         "leopard"),
+    ("capybara",             "capybara"),
+    ("arctic fox",           "fox"),
+    ("emperor penguin",      "penguin"),
+    ("red panda",            "red panda"),
+    ("meerkat",              "meerkat"),
 ]
 
-BACKGROUNDS = [
-    "cozy living room with warm lighting",
-    "magical garden with flowers",
-    "kitchen with colourful decorations",
-    "beach at sunset",
-    "snowy winter scene",
-    "rainbow candy land",
-    "Japanese cherry blossom park",
-    "neon city night",
-    "sunny meadow with butterflies",
-    "cozy bedroom with fairy lights",
-]
+# Rotate animals by day of month
+def _get_today_animal():
+    return ANIMALS[date.today().day % len(ANIMALS)]
 
-_CONCEPT_PROMPT = """You are a creative director for a viral TikTok animal page similar to @cuteandchubbycat.
+_PROMPT = """You are a creator of viral educational animal facts videos for TikTok and YouTube Shorts.
 
-Today's video concept:
-- Animal: {animal}
-- Visual style: {style}
-- Action: {action}
-- Background: {background}
+Today's animal: {animal_name}
 
-Generate a viral concept. Return ONLY valid JSON, no markdown, no extra text:
+Create content for a 60-second educational narration video. Return ONLY valid JSON:
 
 {{
-  "title": "catchy title max 5 words with emoji",
-  "description": "1 sentence describing the cute scene",
-  "sd_prompt": "{style}, {animal}, {action}, {background}, chubby cute proportions, big expressive eyes, smooth shading, vibrant saturated colors, thick clean outlines, high quality render, adorable, wholesome, social media viral, masterpiece, best quality",
-  "sd_negative": "ugly, deformed, blurry, low quality, realistic photo, human, text, watermark, extra limbs, bad anatomy, dark, scary, violence",
-  "caption": "viral TikTok caption — start with a hook emoji, 2 fun lines, 8 trending hashtags including #aicat #cutecat #fyp #viral",
-  "style": "{style}",
-  "animal": "{animal}"
+  "animal": "{animal_name}",
+  "hook": "One attention-grabbing opening sentence (max 15 words) starting with a surprising fact",
+  "facts": [
+    "Fact 1 — surprising and specific (max 20 words)",
+    "Fact 2 — behaviour or ability fact (max 20 words)",
+    "Fact 3 — size, speed, or record fact (max 20 words)",
+    "Fact 4 — social or family life fact (max 20 words)",
+    "Fact 5 — conservation or unique trait fact (max 20 words)"
+  ],
+  "closing": "Engaging closing sentence asking viewers to follow for more (max 15 words)",
+  "sd_prompt": "chibi cartoon illustration, cute {animal_name}, sitting and looking at camera, big expressive eyes, soft rounded body, four legs clearly visible, symmetrical, clean white background, vibrant colors, smooth cell shading, thick outlines, kawaii style, masterpiece, best quality, high detail",
+  "sd_negative": "six legs, extra limbs, deformed, ugly, blurry, realistic photo, human, text, watermark, bad anatomy, mutation, extra fingers, fused limbs, missing limbs, asymmetrical",
+  "title": "5 Amazing Facts About {animal_name}s That Will Blow Your Mind 🤯",
+  "caption": "Did you know this about {animal_name}s? 🐾\\nFollow for daily animal facts! 🌿\\n#animalfacts #{tag} #didyouknow #learnontiktok #animals #wildlife #fyp #viral"
 }}
 """
 
 
 def generate_concept() -> dict:
-    today = date.today()
-    style  = STYLE_ROTATION[today.weekday()]
-    animal = ANIMAL_ROTATION[today.day % 7]
-    action = random.choice(ACTIONS)
-    bg     = random.choice(BACKGROUNDS)
+    animal_name, tag = _get_today_animal()
+    log.info(f"Today's animal: {animal_name}")
 
-    log.info(f"Today's concept: {animal} | {style} | {action}")
-
-    prompt = _CONCEPT_PROMPT.format(
-        animal=animal, style=style, action=action, background=bg
-    )
-
+    prompt = _PROMPT.format(animal_name=animal_name, tag=tag)
     client = _get_client()
+
     response = client.models.generate_content(
         model=cfg.GEMINI_MODEL,
         contents=prompt,
@@ -119,32 +89,56 @@ def generate_concept() -> dict:
     try:
         concept = json.loads(raw.strip())
     except json.JSONDecodeError:
-        log.warning("Gemini returned non-JSON, using fallback concept")
-        concept = _fallback_concept(animal, style, action, bg)
+        log.warning("Gemini returned non-JSON — using fallback")
+        concept = _fallback(animal_name, tag)
 
-    log.info(f"Concept: {concept.get('title', 'N/A')}")
+    # Build full narration script from parts
+    facts = concept.get("facts", [])
+    concept["narration"] = (
+        concept.get("hook", "") + " " +
+        " ".join(facts) + " " +
+        concept.get("closing", "")
+    ).strip()
+
+    log.info(f"Animal: {animal_name} | Facts: {len(facts)}")
     return concept
 
 
-def _fallback_concept(animal, style, action, bg):
+def _fallback(animal_name, tag):
     return {
-        "title": f"🐱 {animal.title()} Moment",
-        "description": f"A {style} {animal} {action} in {bg}.",
+        "animal": animal_name,
+        "hook": f"You won't believe what {animal_name}s can do!",
+        "facts": [
+            f"{animal_name}s are fascinating creatures found around the world.",
+            f"They have unique adaptations that help them survive in the wild.",
+            f"Their diet consists of carefully selected foods for their needs.",
+            f"They live in social groups and communicate in complex ways.",
+            f"Conservation efforts are helping protect their populations.",
+        ],
+        "closing": "Follow for more amazing animal facts every day!",
         "sd_prompt": (
-            f"{style}, {animal}, {action}, {bg}, "
-            f"chubby cute proportions, big expressive eyes, smooth shading, "
-            f"vibrant saturated colors, thick clean outlines, high quality render, "
-            f"adorable, wholesome, masterpiece, best quality"
+            f"chibi cartoon illustration, cute {animal_name}, sitting and looking at camera, "
+            f"big expressive eyes, soft rounded body, four legs clearly visible, symmetrical, "
+            f"clean white background, vibrant colors, smooth cell shading, thick outlines, "
+            f"kawaii style, masterpiece, best quality"
         ),
         "sd_negative": (
-            "ugly, deformed, blurry, low quality, realistic photo, human, "
-            "text, watermark, extra limbs, bad anatomy, dark, scary"
+            "six legs, extra limbs, deformed, ugly, blurry, realistic photo, human, "
+            "text, watermark, bad anatomy, mutation, fused limbs, missing limbs"
         ),
+        "title": f"5 Amazing Facts About {animal_name}s!",
         "caption": (
-            f"😍 This {animal} just made my day!\n"
-            f"So cute I can't handle it 🥹\n"
-            f"#aicat #cutecat #fyp #viral #cute #cat #animallover #trending"
+            f"Did you know this about {animal_name}s? 🐾\n"
+            f"Follow for daily animal facts! 🌿\n"
+            f"#animalfacts #{tag} #didyouknow #learnontiktok #animals #wildlife #fyp #viral"
         ),
-        "style": style,
-        "animal": animal,
+        "narration": (
+            f"You won't believe what {animal_name}s can do! "
+            f"{animal_name}s are fascinating creatures found around the world. "
+            "They have unique adaptations that help them survive in the wild. "
+            "Their diet consists of carefully selected foods for their needs. "
+            "They live in social groups and communicate in complex ways. "
+            "Conservation efforts are helping protect their populations. "
+            "Follow for more amazing animal facts every day!"
+        ),
     }
