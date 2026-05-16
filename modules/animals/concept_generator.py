@@ -2,29 +2,33 @@
 Animal Module — Step 1.
 Gemini generates today's animal video concept + Stable Diffusion prompt.
 Style rotates daily: realistic → cartoon → photorealistic → anime → mixed
+Uses google-genai SDK (new, replaces deprecated google-generativeai)
 """
 import json
 import random
 from datetime import date
-import google.generativeai as genai
+from google import genai
 from modules.shared.config_loader import cfg
 from modules.shared.logger import log
 
-genai.configure(api_key=cfg.GEMINI_API_KEY)
-_model = genai.GenerativeModel(cfg.GEMINI_MODEL)
+_client = None
 
-# Daily style rotation (keyed by day-of-week 0=Mon)
+def _get_client():
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=cfg.GEMINI_API_KEY)
+    return _client
+
 STYLE_ROTATION = {
-    0: "photorealistic",   # Monday
-    1: "cartoon",          # Tuesday
-    2: "anime",            # Wednesday
-    3: "photorealistic",   # Thursday
-    4: "cartoon",          # Friday
-    5: "mixed",            # Saturday
-    6: "anime",            # Sunday
+    0: "photorealistic",
+    1: "cartoon",
+    2: "anime",
+    3: "photorealistic",
+    4: "cartoon",
+    5: "mixed",
+    6: "anime",
 }
 
-# Animal rotation (keyed by day-of-month % 3)
 ANIMAL_ROTATION = {0: "cat", 1: "dog", 2: "mixed"}
 
 DANCE_STYLES = [
@@ -62,10 +66,6 @@ Generate a viral animal video concept. Return ONLY valid JSON, no markdown, no e
 
 
 def generate_concept() -> dict:
-    """
-    Generate today's animal content concept.
-    Returns a dict with all fields needed for image generation + assembly.
-    """
     today = date.today()
     style  = STYLE_ROTATION[today.weekday()]
     animal = ANIMAL_ROTATION[today.day % 3]
@@ -78,10 +78,13 @@ def generate_concept() -> dict:
         animal=animal, style=style, dance=dance, background=bg
     )
 
-    response = _model.generate_content(prompt)
+    client = _get_client()
+    response = client.models.generate_content(
+        model=cfg.GEMINI_MODEL,
+        contents=prompt,
+    )
     raw = response.text.strip()
 
-    # Strip markdown fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
@@ -97,7 +100,7 @@ def generate_concept() -> dict:
     return concept
 
 
-def _fallback_concept(animal: str, style: str, dance: str, bg: str) -> dict:
+def _fallback_concept(animal, style, dance, bg):
     return {
         "title": f"Cute {animal} {dance}",
         "description": f"A {style} {animal} doing the {dance} in {bg}.",
