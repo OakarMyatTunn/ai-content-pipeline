@@ -9,6 +9,7 @@ Step 4 of recap pipeline.
 - Exports for TikTok / Facebook / YouTube Shorts
 """
 import subprocess
+from modules.shared.ffmpeg_utils import ff_cmd
 import tempfile
 import random
 from pathlib import Path
@@ -70,7 +71,7 @@ def select_key_segments(segments: list[dict], max_duration: int = 180) -> list[d
 
 def _run_ffmpeg(cmd: list, label: str = "") -> None:
     log.info(f"ffmpeg {label}...")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(ff_cmd(cmd), capture_output=True, text=True)
     if result.returncode != 0:
         log.error(f"ffmpeg failed: {result.stderr[-500:]}")
         raise RuntimeError(f"ffmpeg error in {label}")

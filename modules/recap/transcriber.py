@@ -5,6 +5,7 @@ Step 1 of recap pipeline.
 - Returns SRT string + list of timed segments
 """
 import subprocess
+from modules.shared.ffmpeg_utils import ff_cmd
 import tempfile
 from pathlib import Path
 from faster_whisper import WhisperModel
@@ -32,7 +33,7 @@ def _get_model() -> WhisperModel:
 def extract_audio(video_path: Path, out_dir: Path) -> Path:
     """Extract mono 16kHz WAV from video using ffmpeg."""
     audio_path = out_dir / (video_path.stem + "_audio.wav")
-    cmd = [
+    cmd = ff_cmd([
         "ffmpeg", "-y",
         "-i", str(video_path),
         "-vn",                    # no video
@@ -40,7 +41,7 @@ def extract_audio(video_path: Path, out_dir: Path) -> Path:
         "-ar", "16000",           # 16kHz (Whisper requirement)
         "-ac", "1",               # mono
         str(audio_path),
-    ]
+    ])
     log.info(f"Extracting audio: {video_path.name} → {audio_path.name}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:

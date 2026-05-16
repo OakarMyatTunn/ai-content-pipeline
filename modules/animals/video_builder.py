@@ -1,19 +1,55 @@
 """
 Animal Module — Step 3.
 Stitches SD frames into a 9:16 viral video with music and caption overlay.
+Auto-detects ffmpeg path on Windows.
 """
 import subprocess
 import random
+import shutil
 import tempfile
 from pathlib import Path
 from modules.shared.config_loader import cfg
 from modules.shared.logger import log
 
 
+def _get_ffmpeg() -> str:
+    """Find ffmpeg executable — checks PATH first, then common Windows locations."""
+    # Check if it's in PATH
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    # Common Windows install locations
+    candidates = [
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+    ]
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    raise FileNotFoundError(
+        "ffmpeg not found. Please install ffmpeg and add it to PATH.\n"
+        "Download: https://github.com/BtbN/FFmpeg-Builds/releases\n"
+        "Extract to C:\\ffmpeg and add C:\\ffmpeg\\bin to system PATH."
+    )
+
+
+_FFMPEG = None
+
+def _ff() -> str:
+    global _FFMPEG
+    if _FFMPEG is None:
+        _FFMPEG = _get_ffmpeg()
+        log.info(f"ffmpeg found: {_FFMPEG}")
+    return _FFMPEG
+
+
 def _run(cmd: list, label: str = "") -> None:
+    # Replace "ffmpeg" string in cmd with actual path
+    cmd = [_ff() if c == "ffmpeg" else c for c in cmd]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg error [{label}]: {result.stderr[-400:]}")
+        raise RuntimeError(f"ffmpeg error [{label}]: {result.stderr[-600:]}")
 
 
 def _pick_music(music_dir: Path):
@@ -51,9 +87,9 @@ def build_animal_video(frames, concept, out_dir, stem):
         concat_txt = tmp_path / "frames.txt"
         lines = []
         for p in resized:
-            lines.append(f"file '{p}'")
+            lines.append(f"file '{str(p).replace(chr(92), '/')}'")
             lines.append(f"duration {frame_duration:.3f}")
-        lines.append(f"file '{resized[-1]}'")
+        lines.append(f"file '{str(resized[-1]).replace(chr(92), '/')}'")
         concat_txt.write_text("\n".join(lines), encoding="utf-8")
 
         # 3. Create base video from frames
@@ -68,7 +104,7 @@ def build_animal_video(frames, concept, out_dir, stem):
 
         # 4. Add caption overlay
         title = concept.get("title", "Cute Animal")
-        safe_title = title.replace("'", "\\'").replace(":", "\\:")
+        safe_title = title.replace("'", "").replace(":", "").replace('"', '')
         captioned = tmp_path / "captioned.mp4"
         _run([
             "ffmpeg", "-y", "-i", str(base_video),
@@ -102,7 +138,7 @@ def build_animal_video(frames, concept, out_dir, stem):
                 str(final_video),
             ], "music")
         else:
-            log.warning("No music files found in /music/ — exporting without audio")
+            log.warning("No music — exporting without audio")
             final_video = captioned
 
         # 6. Final export
