@@ -67,20 +67,36 @@ def build_animal_video(frames, concept, out_dir, stem):
             str(base_video),
         ], "base video")
 
-        # 4. Add caption overlay
+        # 4. Add caption overlay using PIL (no fontconfig needed on Windows)
+        from PIL import Image, ImageDraw, ImageFont
+        import textwrap
+
         title = concept.get("title", "Cute Animal")
-        safe_title = title.replace("'", "").replace(":", "").replace('"', '')
+        # Create a caption PNG overlay
+        caption_img = tmp_path / "caption.png"
+        img = Image.new("RGBA", (cfg.VIDEO_WIDTH, 120), (0, 0, 0, 160))
+        draw = ImageDraw.Draw(img)
+        # Use default PIL font (always available)
+        try:
+            font = ImageFont.truetype("arial.ttf", 52)
+        except Exception:
+            font = ImageFont.load_default()
+        # Center the text
+        bbox = draw.textbbox((0, 0), title, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_x = max(0, (cfg.VIDEO_WIDTH - text_w) // 2)
+        draw.text((text_x, 30), title, font=font, fill=(255, 255, 255, 255))
+        img.save(str(caption_img))
+
         captioned = tmp_path / "captioned.mp4"
         _run([
-            "ffmpeg", "-y", "-i", str(base_video),
-            "-vf", (
-                f"drawtext=text='{safe_title}':"
-                f"fontsize=52:fontcolor=white:"
-                f"borderw=3:bordercolor=black:"
-                f"x=(w-text_w)/2:y=h-120:"
-                f"enable='between(t,0,{total_duration})'"
-            ),
-            "-c:v", "libx264", "-preset", "fast", "-c:a", "copy",
+            "ffmpeg", "-y",
+            "-i", str(base_video),
+            "-i", str(caption_img),
+            "-filter_complex",
+            f"[0:v][1:v]overlay=0:H-120",
+            "-c:v", "libx264", "-preset", "fast",
+            "-c:a", "copy",
             str(captioned),
         ], "caption")
 
