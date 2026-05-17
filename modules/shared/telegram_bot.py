@@ -213,11 +213,13 @@ class RecapBot:
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📖 <b>How to use:</b>\n\n"
-            "<b>Option A — Send a URL:</b>\n"
-            "Paste a YouTube, TikTok, Facebook, or Instagram video URL\n"
-            "I'll download it automatically\n\n"
-            "<b>Option B — Send a file:</b>\n"
-            "Send a video file directly (MP4, MKV, AVI, MOV — max 2GB)\n\n"
+            "<b>Option A — YouTube / TikTok / Facebook URL:</b>\n"
+            "Paste any public video URL — I'll download it automatically\n\n"
+            "<b>Option B — Google Drive link:</b>\n"
+            "Upload your video to Google Drive → Share → Anyone with link\n"
+            "Then paste the link here — no size limit!\n\n"
+            "<b>Option C — Send a file:</b>\n"
+            "Send video directly (max 20MB Telegram limit)\n\n"
             "<b>Then:</b>\n"
             "2️⃣ I'll transcribe and generate EN + Myanmar scripts\n"
             "3️⃣ Review both scripts\n"
@@ -312,40 +314,67 @@ class RecapBot:
         text = update.message.text.strip()
 
         # Check if it looks like a URL we support
-        from modules.shared.downloader import is_supported_url, get_video_info, download_url
+        from modules.shared.downloader import (
+            is_supported_url, is_gdrive_url,
+            get_video_info, download_url, download_gdrive
+        )
 
-        if not is_supported_url(text):
+        is_gdrive = is_gdrive_url(text)
+        is_other = is_supported_url(text)
+
+        if not is_gdrive and not is_other:
             # Not a URL — ignore (could be language reply handled elsewhere)
             return
 
-        # Get video info first
-        await update.message.reply_text("🔍 Checking video...")
-        info = get_video_info(text)
-        title = info.get("title", "Unknown")
-        duration_min = info.get("duration", 0) // 60
+        import threading
+        result_holder = [None]
+        error_holder = [None]
 
-        await update.message.reply_text(
-            f"📹 <b>Found:</b> {title}\n"
-            f"⏱ Duration: {duration_min} min\n\n"
-            f"⬇️ Downloading... (this may take a few minutes)",
-            parse_mode="HTML"
-        )
+        if is_gdrive:
+            # Google Drive flow
+            await update.message.reply_text(
+                "📁 <b>Google Drive link detected!</b>\n"
+                "⬇️ Downloading... (large files may take several minutes)",
+                parse_mode="HTML"
+            )
 
-        try:
-            # Progress updates during download
             last_pct = [0]
-            async def send_progress(pct, line):
-                if pct - last_pct[0] >= 20:  # update every 20%
-                    last_pct[0] = pct
+            def progress_cb(pct, msg):
+                last_pct[0] = pct
+
+            def do_gdrive():
+                try:
+                    result_holder[0] = download_gdrive(text, progress_cb)
+                except Exception as e:
+                    error_holder[0] = e
+
+            thread = threading.Thread(target=do_gdrive)
+            thread.start()
+
+            while thread.is_alive():
+                await asyncio.sleep(10)
+                pct = last_pct[0]
+                if pct > 0:
                     await update.message.reply_text(
-                        f"⬇️ Downloading... {pct:.0f}%"
+                        f"⬇️ Downloading from Drive... {pct:.0f}%"
                     )
+            thread.join()
 
-            # Download in thread (blocking)
-            import threading
-            result_holder = [None]
-            error_holder = [None]
+        else:
+            # YouTube / TikTok / other URL flow
+            await update.message.reply_text("🔍 Checking video...")
+            info = get_video_info(text)
+            title = info.get("title", "Unknown")
+            duration_min = info.get("duration", 0) // 60
 
+            await update.message.reply_text(
+                f"📹 <b>Found:</b> {title}\n"
+                f"⏱ Duration: {duration_min} min\n\n"
+                f"⬇️ Downloading...",
+                parse_mode="HTML"
+            )
+
+            last_pct = [0]
             def do_download():
                 try:
                     result_holder[0] = download_url(text)
@@ -355,16 +384,15 @@ class RecapBot:
             thread = threading.Thread(target=do_download)
             thread.start()
 
-            # Poll while downloading
-            import asyncio
             while thread.is_alive():
-                await asyncio.sleep(5)
+                await asyncio.sleep(8)
                 if last_pct[0] > 0:
                     await update.message.reply_text(
                         f"⬇️ Still downloading... {last_pct[0]:.0f}%"
                     )
             thread.join()
 
+        try:
             if error_holder[0]:
                 raise error_holder[0]
 
@@ -377,7 +405,6 @@ class RecapBot:
                 parse_mode="HTML"
             )
 
-            # Trigger pipeline in background
             def run_pipeline():
                 from modules.recap.pipeline import run as recap_run
                 recap_run(video_path)
@@ -385,13 +412,15 @@ class RecapBot:
             threading.Thread(target=run_pipeline, daemon=True).start()
 
         except Exception as e:
-            log.exception(f"URL download error: {e}")
+            log.exception(f"Download error: {e}")
+            source = "Google Drive" if is_gdrive else "URL"
             await update.message.reply_text(
-                f"❌ <b>Download failed:</b>\n{str(e)}\n\n"
-                f"Try:\n"
-                f"• Check the URL is correct and video is public\n"
-                f"• YouTube age-restricted videos need cookies\n"
-                f"• Send the video file directly instead",
+                f"❌ <b>{source} download failed:</b>\n{str(e)}\n\n"
+                + (
+                    "Make sure the file is shared as <b>Anyone with the link</b> (Viewer)."
+                    if is_gdrive else
+                    "Check the URL is correct and the video is public."
+                ),
                 parse_mode="HTML"
             )
 
