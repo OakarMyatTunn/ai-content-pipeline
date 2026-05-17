@@ -25,44 +25,78 @@ MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
 # ── Simple one-shot send ──────────────────────────────────────────────────────
 
 async def _send_text(text: str, parse_mode: str = "HTML") -> None:
-    bot = Bot(token=cfg.TELEGRAM_BOT_TOKEN)
-    for chunk in _split(text, 4000):
-        await bot.send_message(
-            chat_id=cfg.TELEGRAM_CHAT_ID, text=chunk, parse_mode=parse_mode
-        )
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(write_timeout=60, read_timeout=60)
+    bot = Bot(token=cfg.TELEGRAM_BOT_TOKEN, request=request)
+    async with bot:
+        for chunk in _split(text, 4000):
+            await bot.send_message(
+                chat_id=cfg.TELEGRAM_CHAT_ID, text=chunk, parse_mode=parse_mode
+            )
 
 def send_message(text: str) -> None:
-    asyncio.run(_send_text(text))
+    """Send text message — safe to call from any thread."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            future = asyncio.run_coroutine_threadsafe(_send_text(text), loop)
+            future.result(timeout=60)
+        else:
+            loop.run_until_complete(_send_text(text))
+    except RuntimeError:
+        asyncio.run(_send_text(text))
 
 
 # ── Send video file ───────────────────────────────────────────────────────────
 
 async def _send_video_file(video_path: Path, caption: str = "") -> None:
-    bot = Bot(token=cfg.TELEGRAM_BOT_TOKEN)
+    from telegram.request import HTTPXRequest
+    # Large files need much longer write timeout (default is 20s — too short)
+    request = HTTPXRequest(write_timeout=300, read_timeout=300, connect_timeout=30)
+    bot = Bot(token=cfg.TELEGRAM_BOT_TOKEN, request=request)
     size_mb = video_path.stat().st_size / 1024 / 1024
-    if size_mb > 50:
-        # Telegram bot limit for sendVideo is 50MB
-        # For larger files, send as document
-        log.info(f"Video {size_mb:.0f}MB > 50MB — sending as document")
-        with open(video_path, "rb") as f:
-            await bot.send_document(
-                chat_id=cfg.TELEGRAM_CHAT_ID,
-                document=f,
-                caption=caption[:1024],
-                parse_mode="HTML",
-            )
-    else:
-        with open(video_path, "rb") as f:
-            await bot.send_video(
-                chat_id=cfg.TELEGRAM_CHAT_ID,
-                video=f,
-                caption=caption[:1024],
-                parse_mode="HTML",
-                supports_streaming=True,
-            )
+
+    async with bot:
+        if size_mb > 50:
+            log.info(f"Video {size_mb:.0f}MB > 50MB — sending as document")
+            with open(video_path, "rb") as f:
+                await bot.send_document(
+                    chat_id=cfg.TELEGRAM_CHAT_ID,
+                    document=f,
+                    caption=caption[:1024],
+                    parse_mode="HTML",
+                    write_timeout=300,
+                    read_timeout=300,
+                )
+        else:
+            with open(video_path, "rb") as f:
+                await bot.send_video(
+                    chat_id=cfg.TELEGRAM_CHAT_ID,
+                    video=f,
+                    caption=caption[:1024],
+                    parse_mode="HTML",
+                    supports_streaming=True,
+                    write_timeout=300,
+                    read_timeout=300,
+                )
 
 def send_video(video_path: Path, caption: str = "") -> None:
-    asyncio.run(_send_video_file(video_path, caption))
+    """Send video — safe to call from any thread."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Already in async context — schedule as coroutine
+            import concurrent.futures
+            future = asyncio.run_coroutine_threadsafe(
+                _send_video_file(video_path, caption), loop
+            )
+            future.result(timeout=360)
+        else:
+            loop.run_until_complete(_send_video_file(video_path, caption))
+    except RuntimeError:
+        # No event loop — create one
+        asyncio.run(_send_video_file(video_path, caption))
 
 
 # ── Language choice gate (blocking) ──────────────────────────────────────────
