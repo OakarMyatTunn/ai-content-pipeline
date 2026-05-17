@@ -80,8 +80,12 @@ def get_video_info(url: str) -> dict:
 def download_gdrive(url: str, progress_callback=None) -> Path:
     """
     Download a file from Google Drive.
-    Handles large files (any size) via direct download URL.
-    The file must be shared publicly (Anyone with link can view).
+    The file must be shared publicly: Anyone with the link (Viewer).
+
+    Strategy:
+    1. Try drive.usercontent.google.com (works for most public files)
+    2. If that returns HTML, try with confirm=t token
+    3. Validate downloaded file is actually a video (not HTML error page)
     """
     import requests
 
@@ -94,64 +98,79 @@ def download_gdrive(url: str, progress_callback=None) -> Path:
 
     log.info(f"Downloading from Google Drive: {file_id}")
 
-    # Use the export/download endpoint
-    download_url_base = f"https://drive.google.com/uc?export=download&id={file_id}"
-
     session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    })
 
-    # First request — may get a virus scan warning for large files
-    response = session.get(download_url_base, stream=True, timeout=30)
+    # Try multiple download endpoints in order
+    endpoints = [
+        f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
+        f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t",
+        f"https://drive.google.com/uc?export=download&id={file_id}",
+    ]
 
-    # Handle Google's "large file" confirmation page
-    if "text/html" in response.headers.get("Content-Type", ""):
-        # Need to confirm download
-        import re as _re
-        confirm_token = None
+    response = None
+    for endpoint in endpoints:
+        log.info(f"  Trying: {endpoint[:60]}...")
+        r = session.get(endpoint, stream=True, timeout=60)
+        content_type = r.headers.get("Content-Type", "")
+        log.info(f"  Content-Type: {content_type} | Status: {r.status_code}")
 
-        # Try to find confirm token in response
-        for k, v in response.cookies.items():
-            if k.startswith("download_warning"):
-                confirm_token = v
+        if r.status_code == 200 and "text/html" not in content_type:
+            response = r
+            log.info("  ✓ Got binary response — proceeding with download")
+            break
+
+        if "text/html" in content_type:
+            # Parse HTML for confirm token
+            page_text = r.text
+            import re as _re
+            # Look for confirm token or uuid
+            for pattern in [
+                r'confirm=([0-9A-Za-z_-]{4,})',
+                r'"uuid":"([0-9a-f-]{36})"',
+                r'download_warning_[^=]+=([^&"]+)',
+            ]:
+                m = _re.search(pattern, page_text)
+                if m:
+                    token = m.group(1)
+                    confirm_url = (
+                        f"https://drive.usercontent.google.com/download"
+                        f"?id={file_id}&export=download&confirm={token}"
+                    )
+                    log.info(f"  Found token, retrying with confirm={token[:8]}...")
+                    r2 = session.get(confirm_url, stream=True, timeout=60)
+                    if "text/html" not in r2.headers.get("Content-Type", ""):
+                        response = r2
+                        break
+            if response:
                 break
 
-        # Also check response text for newer Google Drive format
-        if not confirm_token:
-            text = response.text
-            m = _re.search(r'confirm=([0-9A-Za-z_]+)', text)
-            if m:
-                confirm_token = m.group(1)
-            # Newer format uses uuid
-            m2 = _re.search(r'"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"', text)
-            if m2 and not confirm_token:
-                confirm_token = m2.group(1)
+        log.warning(f"  Endpoint returned HTML or error — trying next...")
 
-        if confirm_token:
-            download_url_confirmed = (
-                f"https://drive.google.com/uc?export=download"
-                f"&id={file_id}&confirm={confirm_token}"
-            )
-            response = session.get(download_url_confirmed, stream=True, timeout=30)
-        else:
-            # Try direct download URL format
-            response = session.get(
-                f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
-                stream=True, timeout=30
-            )
+    if response is None:
+        raise RuntimeError(
+            "Google Drive download failed — all endpoints returned HTML.\n"
+            "Make sure the file is shared as 'Anyone with the link (Viewer)'.\n"
+            "Right-click file in Drive → Share → Change to Anyone with the link."
+        )
 
-    # Get filename from Content-Disposition header
+    # Get filename
     filename = f"gdrive_{file_id}.mp4"
     cd = response.headers.get("Content-Disposition", "")
     if cd:
-        m = re.search(r"filename\*?=([^;\n]+)", cd)
+        m = re.search(r'filename[^;=\n]*=(["']?)([^"'\n;]+)', cd)
         if m:
-            raw = m.group(1).strip().strip('"').strip("'")
+            raw = m.group(2).strip()
             if raw:
                 filename = raw
+
     # Ensure video extension
     if not any(filename.lower().endswith(ext) for ext in
-               [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v"]):
+               [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".flv"]):
         filename += ".mp4"
-    # out_path always set here — outside the if cd block
+
     out_path = queue_dir / filename
     total_size = int(response.headers.get("Content-Length", 0))
     downloaded = 0
@@ -160,20 +179,38 @@ def download_gdrive(url: str, progress_callback=None) -> Path:
     log.info(f"Saving to: {out_path.name} ({total_size/1024/1024:.0f}MB)")
 
     with open(out_path, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024 * 1024):  # 1MB chunks
+        for chunk in response.iter_content(chunk_size=2 * 1024 * 1024):  # 2MB chunks
             if chunk:
                 f.write(chunk)
                 downloaded += len(chunk)
                 if total_size > 0:
                     pct = (downloaded / total_size) * 100
-                    if pct - last_pct >= 10:
+                    if pct - last_pct >= 5:
                         last_pct = pct
                         log.info(f"  Download: {pct:.0f}% ({downloaded/1024/1024:.0f}MB)")
                         if progress_callback:
                             progress_callback(pct, f"{pct:.0f}%")
 
+    # Validate — check file is not an HTML error page
     size_mb = out_path.stat().st_size / 1024 / 1024
-    log.info(f"Google Drive download complete: {out_path.name} ({size_mb:.0f}MB)")
+    if size_mb < 0.1:
+        # Tiny file — probably HTML error
+        try:
+            snippet = open(out_path, "rb").read(200)
+            if b"<!DOCTYPE" in snippet or b"<html" in snippet:
+                out_path.unlink()
+                raise RuntimeError(
+                    "Google Drive returned an error page instead of the video.\n"
+                    "The file may not be shared publicly.\n"
+                    "Go to Google Drive → Right-click file → Share → "
+                    "Anyone with the link → Viewer → Copy link."
+                )
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+
+    log.info(f"Google Drive download complete: {out_path.name} ({size_mb:.1f}MB)")
     return out_path
 
 
