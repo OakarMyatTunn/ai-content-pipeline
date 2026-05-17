@@ -129,31 +129,69 @@ def _burn_subtitles_pil(
     return mixed_video
 
 
-def select_key_segments(segments: list[dict], max_duration: int = 180) -> list[dict]:
+def select_key_segments(segments: list[dict], max_duration: int = 180,
+                        video_path: Path = None) -> list[dict]:
+    """
+    Select key segments for clipping.
+    If no dialogue segments (music videos etc), falls back to
+    evenly-spaced clips across the full video duration.
+    """
     MAX_CLIP = 4.0
     selected = []
     total = 0.0
 
-    for seg in segments[:5]:
-        dur = min(seg["end"] - seg["start"], MAX_CLIP)
-        selected.append({**seg, "clip_duration": dur})
-        total += dur
-        if total >= 10:
-            break
+    if segments:
+        for seg in segments[:5]:
+            dur = min(seg["end"] - seg["start"], MAX_CLIP)
+            selected.append({**seg, "clip_duration": dur})
+            total += dur
+            if total >= 10:
+                break
 
-    mid = segments[len(segments) // 4: 3 * len(segments) // 4]
-    step = max(1, len(mid) // 20)
-    for seg in mid[::step]:
-        if total >= max_duration - 15:
-            break
-        dur = min(seg["end"] - seg["start"], MAX_CLIP)
-        selected.append({**seg, "clip_duration": dur})
-        total += dur
+        mid = segments[len(segments) // 4: 3 * len(segments) // 4]
+        step = max(1, len(mid) // 20)
+        for seg in mid[::step]:
+            if total >= max_duration - 15:
+                break
+            dur = min(seg["end"] - seg["start"], MAX_CLIP)
+            selected.append({**seg, "clip_duration": dur})
+            total += dur
 
-    for seg in segments[-5:]:
-        dur = min(seg["end"] - seg["start"], MAX_CLIP)
-        selected.append({**seg, "clip_duration": dur})
-        total += dur
+        for seg in segments[-5:]:
+            dur = min(seg["end"] - seg["start"], MAX_CLIP)
+            selected.append({**seg, "clip_duration": dur})
+            total += dur
+
+    # Fallback: no segments or very few — use evenly spaced clips
+    if len(selected) < 5 and video_path and video_path.exists():
+        log.warning("Few/no dialogue segments — using evenly spaced clips")
+        # Get video duration via ffprobe
+        import subprocess, json
+        from modules.shared.ffmpeg_utils import get_ffmpeg
+        ffmpeg = get_ffmpeg()
+        ffprobe = ffmpeg.replace("ffmpeg.exe", "ffprobe.exe").replace("ffmpeg", "ffprobe")
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "quiet", "-print_format", "json",
+                 "-show_format", str(video_path)],
+                capture_output=True, text=True
+            )
+            vid_dur = float(json.loads(r.stdout)["format"]["duration"])
+        except Exception:
+            vid_dur = 300.0  # assume 5 min if detection fails
+
+        n_clips = min(40, int(max_duration / MAX_CLIP))
+        interval = vid_dur / (n_clips + 1)
+        selected = []
+        for i in range(n_clips):
+            t_start = interval * (i + 1)
+            selected.append({
+                "start": t_start,
+                "end": t_start + MAX_CLIP,
+                "text": "",
+                "clip_duration": MAX_CLIP,
+            })
+        total = n_clips * MAX_CLIP
 
     log.info(f"Selected {len(selected)} clips → ~{total:.0f}s total")
     return selected
@@ -169,7 +207,7 @@ def build_video(
     stem: str,
 ) -> dict[str, Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
-    selected = select_key_segments(segments)
+    selected = select_key_segments(segments, video_path=source_video)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -198,8 +236,10 @@ def build_video(
 
         # ── 2. Concatenate ────────────────────────────────────────────────────
         concat_list = tmp_path / "concat.txt"
+        # Use forward slashes in paths — ffmpeg concat requires this on Windows
         concat_list.write_text(
-            "\n".join(f"file '{p}'" for p in clip_paths), encoding="utf-8"
+            "\n".join(f"file '{str(p).replace(chr(92), '/')}'" for p in clip_paths),
+            encoding="utf-8"
         )
         raw_video = tmp_path / "raw_concat.mp4"
         _run_ffmpeg([
