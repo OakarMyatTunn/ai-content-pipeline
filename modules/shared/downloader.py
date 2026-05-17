@@ -160,7 +160,7 @@ def download_gdrive(url: str, progress_callback=None) -> Path:
     filename = f"gdrive_{file_id}.mp4"
     cd = response.headers.get("Content-Disposition", "")
     if cd:
-        m = re.search(r'filename[^;=\n]*=(["']?)([^"'\n;]+)', cd)
+        m = re.search(r"filename=.?([^;\n]+)", cd)
         if m:
             raw = m.group(2).strip()
             if raw:
