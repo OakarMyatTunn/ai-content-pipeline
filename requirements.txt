@@ -8,6 +8,8 @@ watchdog==4.0.1
 # ── Video / Audio ─────────────────────────────────
 edge-tts==6.1.12
 gTTS==2.5.1
+kokoro>=0.9.4          # human-like TTS — pip install kokoro
+soundfile==0.12.1      # audio file I/O for kokoro output
 moviepy==1.0.3
 Pillow==10.4.0
 

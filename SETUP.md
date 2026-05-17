@@ -91,6 +91,24 @@ Should print `True`. If it prints `False`, check your CUDA installation.
 pip install -r requirements.txt
 ```
 
+## Step 8b — Install Kokoro TTS (human-like voice)
+
+```cmd
+pip install kokoro soundfile
+```
+
+Then install the espeak backend (required by Kokoro on Windows):
+1. Download: https://github.com/espeak-ng/espeak-ng/releases
+2. Install `espeak-ng-X.X.X-x64.msi`
+3. Restart your terminal
+
+Verify Kokoro works:
+```cmd
+python -c "from kokoro import KPipeline; p = KPipeline(lang_code='a'); print('Kokoro OK')"
+```
+
+If Kokoro fails, the pipeline automatically falls back to gTTS — so it will still work.
+
 This takes 5–10 minutes. Ignore any yellow warnings.
 
 ---

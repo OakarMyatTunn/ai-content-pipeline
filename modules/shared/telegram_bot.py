@@ -1,94 +1,134 @@
 """
-Telegram bot helper.
-- send_message()        : plain notification
-- send_approval_request(): sends script with Approve/Reject buttons
-                           blocks until user responds (used by recap module)
-- send_daily_summary()  : sends animal content summary with video paths
+Telegram Bot — Complete redesign for Telegram-first recap workflow.
+
+Flow:
+1. User sends video file → bot downloads to queue
+2. Bot transcribes → generates EN + Myanmar scripts
+3. Bot sends both scripts → asks user to choose language
+4. User replies: "english" / "myanmar" / "both"
+5. Bot generates Kokoro voiceover + assembles video
+6. Bot sends final video(s) directly in chat
 """
 import asyncio
+import os
+import time
 from pathlib import Path
-from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Application, CallbackQueryHandler, ContextTypes
+from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (Application, MessageHandler, CommandHandler,
+                          CallbackQueryHandler, ContextTypes, filters)
 from modules.shared.config_loader import cfg
 from modules.shared.logger import log
 
+# Max file size Telegram bots can receive: 2GB
+MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024
 
 # ── Simple one-shot send ──────────────────────────────────────────────────────
 
-async def _send(text: str, parse_mode: str = "HTML") -> None:
+async def _send_text(text: str, parse_mode: str = "HTML") -> None:
     bot = Bot(token=cfg.TELEGRAM_BOT_TOKEN)
-    # Telegram message limit is 4096 chars — split if needed
     for chunk in _split(text, 4000):
         await bot.send_message(
-            chat_id=cfg.TELEGRAM_CHAT_ID,
-            text=chunk,
-            parse_mode=parse_mode,
+            chat_id=cfg.TELEGRAM_CHAT_ID, text=chunk, parse_mode=parse_mode
         )
 
-
 def send_message(text: str) -> None:
-    asyncio.run(_send(text))
+    asyncio.run(_send_text(text))
 
 
-# ── Approval gate (blocking) ──────────────────────────────────────────────────
+# ── Send video file ───────────────────────────────────────────────────────────
 
-def send_approval_request(
+async def _send_video_file(video_path: Path, caption: str = "") -> None:
+    bot = Bot(token=cfg.TELEGRAM_BOT_TOKEN)
+    size_mb = video_path.stat().st_size / 1024 / 1024
+    if size_mb > 50:
+        # Telegram bot limit for sendVideo is 50MB
+        # For larger files, send as document
+        log.info(f"Video {size_mb:.0f}MB > 50MB — sending as document")
+        with open(video_path, "rb") as f:
+            await bot.send_document(
+                chat_id=cfg.TELEGRAM_CHAT_ID,
+                document=f,
+                caption=caption[:1024],
+                parse_mode="HTML",
+            )
+    else:
+        with open(video_path, "rb") as f:
+            await bot.send_video(
+                chat_id=cfg.TELEGRAM_CHAT_ID,
+                video=f,
+                caption=caption[:1024],
+                parse_mode="HTML",
+                supports_streaming=True,
+            )
+
+def send_video(video_path: Path, caption: str = "") -> None:
+    asyncio.run(_send_video_file(video_path, caption))
+
+
+# ── Language choice gate (blocking) ──────────────────────────────────────────
+
+def send_script_and_get_language(
     movie_name: str,
     script_en: str,
     script_my: str,
 ) -> str:
     """
-    Sends both scripts to Telegram with Approve / Reject / Regenerate buttons.
-    BLOCKS until the user taps a button.
-    Returns: "approved" | "rejected" | "regenerate"
+    Sends both scripts to Telegram.
+    Waits for user to reply with language choice.
+    Returns: "english" | "myanmar" | "both"
     """
-    result: list[str] = []  # mutable container for async result
+    result: list[str] = []
 
     async def _run() -> None:
         app = Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Approve", callback_data="approved"),
-                InlineKeyboardButton("🔄 Regenerate", callback_data="regenerate"),
-            ],
-            [InlineKeyboardButton("❌ Reject (stop)", callback_data="rejected")],
-        ])
-
         bot = app.bot
-        preview_en = script_en[:800] + ("..." if len(script_en) > 800 else "")
-        preview_my = script_my[:400] + ("..." if len(script_my) > 400 else "")
 
-        msg = (
-            f"🎬 <b>New Recap Ready for Approval</b>\n"
-            f"📁 File: <code>{movie_name}</code>\n\n"
-            f"<b>── English Script Preview ──</b>\n{preview_en}\n\n"
-            f"<b>── Myanmar Script Preview ──</b>\n{preview_my}\n\n"
-            f"Tap a button to continue:"
-        )
+        # Send EN script preview
+        preview_en = script_en[:1000] + ("..." if len(script_en) > 1000 else "")
         await bot.send_message(
             chat_id=cfg.TELEGRAM_CHAT_ID,
-            text=msg,
+            text=(
+                f"🎬 <b>Recap Ready — {movie_name}</b>\n\n"
+                f"<b>── English Script ──</b>\n{preview_en}"
+            ),
             parse_mode="HTML",
-            reply_markup=keyboard,
         )
 
-        async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-            query = update.callback_query
-            await query.answer()
-            result.append(query.data)
-            await query.edit_message_reply_markup(reply_markup=None)
-            await query.message.reply_text(
-                f"Got it — <b>{query.data}</b>. Pipeline continuing..." ,
-                parse_mode="HTML",
-            )
-            await app.stop()
+        # Send Myanmar script preview
+        preview_my = script_my[:1000] + ("..." if len(script_my) > 1000 else "")
+        await bot.send_message(
+            chat_id=cfg.TELEGRAM_CHAT_ID,
+            text=(
+                f"<b>── Myanmar Script ──</b>\n{preview_my}\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Reply with your choice:\n"
+                f"👉 <code>english</code>\n"
+                f"👉 <code>myanmar</code>\n"
+                f"👉 <code>both</code>\n"
+                f"👉 <code>cancel</code>"
+            ),
+            parse_mode="HTML",
+        )
 
-        app.add_handler(CallbackQueryHandler(callback))
+        # Wait for reply
+        async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            if str(update.message.chat_id) != str(cfg.TELEGRAM_CHAT_ID):
+                return
+            text = update.message.text.strip().lower()
+            if text in ["english", "myanmar", "both", "cancel"]:
+                result.append(text)
+                await update.message.reply_text(
+                    f"✅ Got it — <b>{text}</b>. Processing now...",
+                    parse_mode="HTML"
+                )
+                await app.stop()
+
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
         async with app:
             await app.start()
             await app.updater.start_polling(drop_pending_updates=True)
-            # Wait until callback fires (max 30 minutes)
+            # Wait up to 30 minutes for reply
             for _ in range(30 * 60):
                 if result:
                     break
@@ -96,52 +136,136 @@ def send_approval_request(
             await app.updater.stop()
 
     asyncio.run(_run())
-    decision = result[0] if result else "rejected"
-    log.info(f"Telegram approval decision: {decision}")
-    return decision
+    choice = result[0] if result else "cancel"
+    log.info(f"Language choice: {choice}")
+    return choice
 
 
-# ── Daily animal summary ──────────────────────────────────────────────────────
+# ── Telegram upload receiver (runs as part of main bot) ──────────────────────
 
-async def _send_animal_summary(videos: list[dict]) -> None:
+class RecapBot:
     """
-    videos = [{"path": Path, "caption": str, "style": str}, ...]
+    Full Telegram bot that:
+    - Receives video files from user
+    - Triggers recap pipeline
+    - Handles all interaction
     """
-    bot = Bot(token=cfg.TELEGRAM_BOT_TOKEN)
-    header = (
-        f"🐾 <b>Daily Animal Content Ready!</b>\n"
-        f"Generated <b>{len(videos)}</b> video(s) today.\n"
-        f"Copy captions below and post manually.\n"
-        f"{'─' * 30}"
-    )
-    await bot.send_message(
-        chat_id=cfg.TELEGRAM_CHAT_ID, text=header, parse_mode="HTML"
-    )
+    def __init__(self):
+        self.app = Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
+        self._setup_handlers()
 
-    for i, v in enumerate(videos, 1):
-        path = Path(v["path"])
-        caption_msg = (
-            f"<b>Video {i} — {v.get('style','mixed')}</b>\n\n"
-            f"📋 <b>Caption to copy:</b>\n"
-            f"<code>{v['caption']}</code>"
+    def _setup_handlers(self):
+        self.app.add_handler(CommandHandler("start", self._cmd_start))
+        self.app.add_handler(CommandHandler("help",  self._cmd_help))
+        self.app.add_handler(CommandHandler("status", self._cmd_status))
+        # Video/document uploads
+        self.app.add_handler(MessageHandler(filters.VIDEO, self._handle_video))
+        self.app.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
+
+    async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "🎬 <b>MyannAI Recap Bot</b>\n\n"
+            "Send me a video file (up to 2GB) and I'll generate a social media recap.\n\n"
+            "📋 <b>Commands:</b>\n"
+            "/start — Show this message\n"
+            "/help — How to use\n"
+            "/status — Check if pipeline is running\n\n"
+            "Just send a video to get started! 🚀",
+            parse_mode="HTML"
         )
-        await bot.send_message(
-            chat_id=cfg.TELEGRAM_CHAT_ID,
-            text=caption_msg,
-            parse_mode="HTML",
+
+    async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "📖 <b>How to use:</b>\n\n"
+            "1️⃣ Send me a video file (MP4, MKV, AVI, MOV — max 2GB)\n"
+            "2️⃣ I'll transcribe and generate EN + Myanmar scripts\n"
+            "3️⃣ Review both scripts\n"
+            "4️⃣ Reply with: <code>english</code>, <code>myanmar</code>, or <code>both</code>\n"
+            "5️⃣ I'll generate a human-like voiceover and send you the final video\n\n"
+            "⚠️ Files over 2GB: compress with HandBrake first (free tool)",
+            parse_mode="HTML"
         )
-        # Send the actual video file if under 50MB
-        if path.exists() and path.stat().st_size < 50 * 1024 * 1024:
-            with open(path, "rb") as f:
-                await bot.send_video(
-                    chat_id=cfg.TELEGRAM_CHAT_ID,
-                    video=f,
-                    caption=f"Video {i}",
-                )
 
+    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        queue_dir = cfg.INPUT_FOLDER / "queue"
+        queue_count = len(list(queue_dir.glob("*"))) if queue_dir.exists() else 0
+        await update.message.reply_text(
+            f"✅ Bot is running\n"
+            f"📂 Queue: {queue_count} file(s) pending",
+            parse_mode="HTML"
+        )
 
-def send_daily_summary(videos: list[dict]) -> None:
-    asyncio.run(_send_animal_summary(videos))
+    async def _handle_video(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await self._process_incoming_file(update, context, update.message.video)
+
+    async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        doc = update.message.document
+        # Only accept video files sent as documents
+        video_exts = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.m4v', '.flv'}
+        if not any(doc.file_name.lower().endswith(ext) for ext in video_exts):
+            await update.message.reply_text(
+                "❌ Unsupported file type.\n"
+                "Please send a video file: MP4, MKV, AVI, MOV, WMV"
+            )
+            return
+        await self._process_incoming_file(update, context, doc)
+
+    async def _process_incoming_file(self, update, context, file_obj):
+        # Check if from authorized user
+        if str(update.message.chat_id) != str(cfg.TELEGRAM_CHAT_ID):
+            await update.message.reply_text("❌ Unauthorized.")
+            return
+
+        # Check file size
+        file_size = getattr(file_obj, 'file_size', 0) or 0
+        if file_size > MAX_FILE_BYTES:
+            size_gb = file_size / 1024 / 1024 / 1024
+            await update.message.reply_text(
+                f"❌ File too large: {size_gb:.1f}GB\n\n"
+                f"Maximum size is 2GB via Telegram.\n"
+                f"Compress with HandBrake (free): https://handbrake.fr\n"
+                f"Settings: H.264, RF 28, 720p"
+            )
+            return
+
+        # Get file name
+        file_name = getattr(file_obj, 'file_name', None) or "video.mp4"
+        size_mb = file_size / 1024 / 1024
+
+        await update.message.reply_text(
+            f"✅ <b>Received!</b> {file_name} ({size_mb:.0f}MB)\n\n"
+            f"📥 Downloading...",
+            parse_mode="HTML"
+        )
+
+        try:
+            # Download to queue folder
+            queue_dir = cfg.INPUT_FOLDER / "queue"
+            queue_dir.mkdir(parents=True, exist_ok=True)
+            out_path = queue_dir / file_name
+
+            tg_file = await context.bot.get_file(file_obj.file_id)
+            await tg_file.download_to_drive(str(out_path))
+
+            await update.message.reply_text(
+                f"✅ Downloaded! Starting recap pipeline...\n"
+                f"🎙️ Transcribing audio (this takes a few minutes)..."
+            )
+
+            # Trigger recap pipeline in background
+            import threading
+            def run_pipeline():
+                from modules.recap.pipeline import run as recap_run
+                recap_run(out_path)
+            threading.Thread(target=run_pipeline, daemon=True).start()
+
+        except Exception as e:
+            log.exception(f"File download error: {e}")
+            await update.message.reply_text(f"❌ Download failed: {str(e)}")
+
+    def run(self):
+        log.info("Recap bot started — waiting for video files...")
+        self.app.run_polling(drop_pending_updates=True)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
