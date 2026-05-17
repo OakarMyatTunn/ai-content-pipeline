@@ -99,6 +99,55 @@ def send_video(video_path: Path, caption: str = "") -> None:
         asyncio.run(_send_video_file(video_path, caption))
 
 
+# ── Daily animal summary ─────────────────────────────────────────────────────
+
+async def _send_animal_summary(videos: list[dict]) -> None:
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(write_timeout=300, read_timeout=300)
+    bot = Bot(token=cfg.TELEGRAM_BOT_TOKEN, request=request)
+    async with bot:
+        header = (
+            f"🐾 <b>Daily Animal Content Ready!</b>\n"
+            f"Generated <b>{len(videos)}</b> video(s) today.\n"
+            f"{'─' * 30}"
+        )
+        await bot.send_message(
+            chat_id=cfg.TELEGRAM_CHAT_ID, text=header, parse_mode="HTML"
+        )
+        for i, v in enumerate(videos, 1):
+            path = Path(v["path"])
+            caption_msg = (
+                f"<b>Video {i} — {v.get('style','mixed')}</b>\n\n"
+                f"📋 <b>Caption:</b>\n<code>{v.get('caption','')}</code>"
+            )
+            await bot.send_message(
+                chat_id=cfg.TELEGRAM_CHAT_ID,
+                text=caption_msg, parse_mode="HTML"
+            )
+            if path.exists() and path.stat().st_size < 50 * 1024 * 1024:
+                with open(path, "rb") as f:
+                    await bot.send_video(
+                        chat_id=cfg.TELEGRAM_CHAT_ID,
+                        video=f, caption=f"Video {i}",
+                        write_timeout=300,
+                    )
+
+
+def send_daily_summary(videos: list[dict]) -> None:
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            future = asyncio.run_coroutine_threadsafe(
+                _send_animal_summary(videos), loop
+            )
+            future.result(timeout=600)
+        else:
+            loop.run_until_complete(_send_animal_summary(videos))
+    except RuntimeError:
+        asyncio.run(_send_animal_summary(videos))
+
+
 # ── Language choice gate (blocking) ──────────────────────────────────────────
 
 def send_script_and_get_language(

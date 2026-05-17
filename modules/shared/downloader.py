@@ -147,11 +147,12 @@ def download_gdrive(url: str, progress_callback=None) -> Path:
             raw = m.group(1).strip().strip('"').strip("'")
             if raw:
                 filename = raw
-            if not any(filename.lower().endswith(ext) for ext in
-                      [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v"]):
-                filename += ".mp4"
-
-        out_path = queue_dir / filename
+    # Ensure video extension
+    if not any(filename.lower().endswith(ext) for ext in
+               [".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v"]):
+        filename += ".mp4"
+    # out_path always set here — outside the if cd block
+    out_path = queue_dir / filename
     total_size = int(response.headers.get("Content-Length", 0))
     downloaded = 0
     last_pct = 0
