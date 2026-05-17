@@ -161,6 +161,8 @@ class RecapBot:
         # Video/document uploads
         self.app.add_handler(MessageHandler(filters.VIDEO, self._handle_video))
         self.app.add_handler(MessageHandler(filters.Document.ALL, self._handle_document))
+        # URL messages
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_text))
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
@@ -177,12 +179,17 @@ class RecapBot:
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "📖 <b>How to use:</b>\n\n"
-            "1️⃣ Send me a video file (MP4, MKV, AVI, MOV — max 2GB)\n"
+            "<b>Option A — Send a URL:</b>\n"
+            "Paste a YouTube, TikTok, Facebook, or Instagram video URL\n"
+            "I'll download it automatically\n\n"
+            "<b>Option B — Send a file:</b>\n"
+            "Send a video file directly (MP4, MKV, AVI, MOV — max 2GB)\n\n"
+            "<b>Then:</b>\n"
             "2️⃣ I'll transcribe and generate EN + Myanmar scripts\n"
             "3️⃣ Review both scripts\n"
-            "4️⃣ Reply with: <code>english</code>, <code>myanmar</code>, or <code>both</code>\n"
-            "5️⃣ I'll generate a human-like voiceover and send you the final video\n\n"
-            "⚠️ Files over 2GB: compress with HandBrake first (free tool)",
+            "4️⃣ Reply: <code>english</code>, <code>myanmar</code>, or <code>both</code>\n"
+            "5️⃣ I send you the final recap video\n\n"
+            "⚠️ Files over 2GB: compress with HandBrake (free): https://handbrake.fr",
             parse_mode="HTML"
         )
 
@@ -263,8 +270,99 @@ class RecapBot:
             log.exception(f"File download error: {e}")
             await update.message.reply_text(f"❌ Download failed: {str(e)}")
 
+    async def _handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle text messages — check if it's a video URL."""
+        if str(update.message.chat_id) != str(cfg.TELEGRAM_CHAT_ID):
+            return
+
+        text = update.message.text.strip()
+
+        # Check if it looks like a URL we support
+        from modules.shared.downloader import is_supported_url, get_video_info, download_url
+
+        if not is_supported_url(text):
+            # Not a URL — ignore (could be language reply handled elsewhere)
+            return
+
+        # Get video info first
+        await update.message.reply_text("🔍 Checking video...")
+        info = get_video_info(text)
+        title = info.get("title", "Unknown")
+        duration_min = info.get("duration", 0) // 60
+
+        await update.message.reply_text(
+            f"📹 <b>Found:</b> {title}\n"
+            f"⏱ Duration: {duration_min} min\n\n"
+            f"⬇️ Downloading... (this may take a few minutes)",
+            parse_mode="HTML"
+        )
+
+        try:
+            # Progress updates during download
+            last_pct = [0]
+            async def send_progress(pct, line):
+                if pct - last_pct[0] >= 20:  # update every 20%
+                    last_pct[0] = pct
+                    await update.message.reply_text(
+                        f"⬇️ Downloading... {pct:.0f}%"
+                    )
+
+            # Download in thread (blocking)
+            import threading
+            result_holder = [None]
+            error_holder = [None]
+
+            def do_download():
+                try:
+                    result_holder[0] = download_url(text)
+                except Exception as e:
+                    error_holder[0] = e
+
+            thread = threading.Thread(target=do_download)
+            thread.start()
+
+            # Poll while downloading
+            import asyncio
+            while thread.is_alive():
+                await asyncio.sleep(5)
+                if last_pct[0] > 0:
+                    await update.message.reply_text(
+                        f"⬇️ Still downloading... {last_pct[0]:.0f}%"
+                    )
+            thread.join()
+
+            if error_holder[0]:
+                raise error_holder[0]
+
+            video_path = result_holder[0]
+            size_mb = video_path.stat().st_size / 1024 / 1024
+
+            await update.message.reply_text(
+                f"✅ <b>Downloaded!</b> {video_path.name} ({size_mb:.0f}MB)\n"
+                f"🎙️ Starting recap pipeline...",
+                parse_mode="HTML"
+            )
+
+            # Trigger pipeline in background
+            def run_pipeline():
+                from modules.recap.pipeline import run as recap_run
+                recap_run(video_path)
+
+            threading.Thread(target=run_pipeline, daemon=True).start()
+
+        except Exception as e:
+            log.exception(f"URL download error: {e}")
+            await update.message.reply_text(
+                f"❌ <b>Download failed:</b>\n{str(e)}\n\n"
+                f"Try:\n"
+                f"• Check the URL is correct and video is public\n"
+                f"• YouTube age-restricted videos need cookies\n"
+                f"• Send the video file directly instead",
+                parse_mode="HTML"
+            )
+
     def run(self):
-        log.info("Recap bot started — waiting for video files...")
+        log.info("Recap bot started — waiting for video files or URLs...")
         self.app.run_polling(drop_pending_updates=True)
 
 
